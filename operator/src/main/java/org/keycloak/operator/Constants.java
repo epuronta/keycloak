@@ -19,7 +19,7 @@ package org.keycloak.operator;
 import java.util.Map;
 
 public final class Constants {
-    public static final String CRDS_GROUP = "keycloak.org";
+    public static final String CRDS_GROUP = "k8s.keycloak.org";
     public static final String CRDS_VERSION = "v2alpha1";
     public static final String SHORT_NAME = "kc";
     public static final String NAME = "keycloak";
@@ -39,13 +39,6 @@ public final class Constants {
         "cache", "ispn",
         "cache-stack", "kubernetes"
     );
-
-    // Init container
-    public static final String EXTENSIONS_VOLUME_NAME = "extensions";
-    public static final String KEYCLOAK_PROVIDERS_FOLDER = "/opt/keycloak/providers";
-    public static final String INIT_CONTAINER_NAME = "keycloak-extensions";
-    public static final String INIT_CONTAINER_EXTENSIONS_FOLDER = "/opt/extensions";
-    public static final String INIT_CONTAINER_EXTENSIONS_ENV_VAR = "KEYCLOAK_EXTENSIONS";
 
     public static final Integer KEYCLOAK_HTTP_PORT = 8080;
     public static final Integer KEYCLOAK_HTTPS_PORT = 8443;

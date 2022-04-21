@@ -6,6 +6,7 @@ import io.quarkus.logging.Log;
 import io.quarkus.test.junit.QuarkusTest;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.keycloak.operator.utils.K8sUtils;
 import org.keycloak.operator.v2alpha1.KeycloakAdminSecret;
 import org.keycloak.operator.v2alpha1.KeycloakDeployment;
@@ -16,7 +17,6 @@ import org.keycloak.operator.v2alpha1.crds.ValueOrSecret;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -25,7 +25,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.keycloak.operator.Constants.DEFAULT_LABELS;
 import static org.keycloak.operator.utils.K8sUtils.deployKeycloak;
 import static org.keycloak.operator.utils.K8sUtils.getDefaultKeycloakDeployment;
 import static org.keycloak.operator.utils.K8sUtils.waitForKeycloakToBeReady;
@@ -151,36 +150,6 @@ public class KeycloakDeploymentE2EIT extends ClusterOperatorTest {
                         var d = k8sclient.apps().deployments().withName(deploymentName).get();
                         assertThat(d.getMetadata().getLabels().entrySet().containsAll(labels.entrySet())).isTrue(); // additional labels should not be overwritten
                         assertThat(d.getSpec()).isEqualTo(origSpecs); // specs should be reconciled back to original values
-                    });
-        } catch (Exception e) {
-            savePodLogs();
-            throw e;
-        }
-    }
-
-    @Test
-    public void testExtensions() {
-        try {
-            var kc = getDefaultKeycloakDeployment();
-            kc.getSpec().setExtensions(
-                    Collections.singletonList(
-                            "https://github.com/aerogear/keycloak-metrics-spi/releases/download/2.5.3/keycloak-metrics-spi-2.5.3.jar"));
-            deployKeycloak(k8sclient, kc, true);
-
-            var kcPod = k8sclient
-                    .pods()
-                    .inNamespace(namespace)
-                    .withLabels(DEFAULT_LABELS)
-                    .list()
-                    .getItems()
-                    .get(0);
-
-            Awaitility.await()
-                    .ignoreExceptions()
-                    .untilAsserted(() -> {
-                        var logs = k8sclient.pods().inNamespace(namespace).withName(kcPod.getMetadata().getName()).getLog();
-
-                        assertTrue(logs.contains("metrics-listener (org.jboss.aerogear.keycloak.metrics.MetricsEventListenerFactory) is implementing the internal SPI"));
                     });
         } catch (Exception e) {
             savePodLogs();
@@ -351,6 +320,29 @@ public class KeycloakDeploymentE2EIT extends ClusterOperatorTest {
                         assertTrue(curlOutput.contains("\"token_type\":\"Bearer\""));
                         assertNotEquals(adminPassword.get(), newPassword);
                     });
+        } catch (Exception e) {
+            savePodLogs();
+            throw e;
+        }
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = OPERATOR_CUSTOM_IMAGE, matches = ".+")
+    public void testCustomImage() {
+        try {
+            var kc = getDefaultKeycloakDeployment();
+            kc.getSpec().setImage(customImage);
+            deployKeycloak(k8sclient, kc, true);
+
+            var pods = k8sclient
+                    .pods()
+                    .inNamespace(namespace)
+                    .withLabels(Constants.DEFAULT_LABELS)
+                    .list()
+                    .getItems();
+
+            assertEquals(1, pods.get(0).getSpec().getContainers().get(0).getArgs().size());
+            assertEquals("start", pods.get(0).getSpec().getContainers().get(0).getArgs().get(0));
         } catch (Exception e) {
             savePodLogs();
             throw e;

@@ -323,6 +323,11 @@ public final class RawKeycloakDistribution implements KeycloakDistribution {
     }
 
     @Override
+    public void setManualStop(boolean manualStop) {
+        this.manualStop = manualStop;
+    }
+
+    @Override
     public void setProperty(String key, String value) {
         setProperty(key, value, distPath.resolve("conf").resolve("keycloak.conf").toFile());
     }
@@ -344,6 +349,8 @@ public final class RawKeycloakDistribution implements KeycloakDistribution {
     @Override
     public void copyOrReplaceFileFromClasspath(String file, Path targetFile) {
         File targetDir = distPath.resolve(targetFile).toFile();
+
+        targetDir.mkdirs();
 
         try {
             Files.copy(getClass().getResourceAsStream(file), targetDir.toPath(), StandardCopyOption.REPLACE_EXISTING);

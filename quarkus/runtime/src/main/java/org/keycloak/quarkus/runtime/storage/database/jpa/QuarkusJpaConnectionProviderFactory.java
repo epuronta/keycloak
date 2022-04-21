@@ -24,6 +24,8 @@ import static org.keycloak.models.utils.KeycloakModelUtils.runJobInTransaction;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
@@ -32,6 +34,7 @@ import java.sql.Statement;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.StringTokenizer;
 
 import javax.enterprise.inject.Instance;
@@ -49,6 +52,7 @@ import org.jboss.logging.Logger;
 import org.keycloak.Config;
 import org.keycloak.ServerStartupError;
 import org.keycloak.common.Version;
+import org.keycloak.common.util.StringPropertyReplacer;
 import org.keycloak.connections.jpa.DefaultJpaConnectionProvider;
 import org.keycloak.connections.jpa.JpaConnectionProvider;
 import org.keycloak.connections.jpa.updater.JpaUpdaterProvider;
@@ -61,6 +65,8 @@ import org.keycloak.models.*;
 import org.keycloak.models.dblock.DBLockManager;
 import org.keycloak.models.dblock.DBLockProvider;
 import org.keycloak.models.utils.RepresentationToModel;
+import org.keycloak.provider.ProviderConfigProperty;
+import org.keycloak.provider.ProviderConfigurationBuilder;
 import org.keycloak.provider.ServerInfoAwareProviderFactory;
 import org.keycloak.representations.idm.RealmRepresentation;
 import org.keycloak.representations.idm.UserRepresentation;
@@ -78,7 +84,7 @@ public class QuarkusJpaConnectionProviderFactory extends AbstractJpaConnectionPr
 
     public static final String QUERY_PROPERTY_PREFIX = "kc.query.";
     private static final Logger logger = Logger.getLogger(QuarkusJpaConnectionProviderFactory.class);
-    private static final String SQL_GET_LATEST_VERSION = "SELECT VERSION FROM %sMIGRATION_MODEL ORDER BY UPDATE_TIME DESC";
+    private static final String SQL_GET_LATEST_VERSION = "SELECT ID, VERSION FROM %sMIGRATION_MODEL ORDER BY UPDATE_TIME DESC";
 
     enum MigrationStrategy {
         UPDATE, VALIDATE, MANUAL
@@ -120,12 +126,27 @@ public class QuarkusJpaConnectionProviderFactory extends AbstractJpaConnectionPr
         this.factory = factory;
 
         KeycloakSession session = factory.create();
+        String id = null;
+        String version = null;
+        String schema = getSchema();
         boolean schemaChanged;
 
         try (Connection connection = getConnection()) {
+            try {
+                try (Statement statement = connection.createStatement()) {
+                    try (ResultSet rs = statement.executeQuery(String.format(SQL_GET_LATEST_VERSION, getSchema(schema)))) {
+                        if (rs.next()) {
+                            id = rs.getString(1);
+                            version = rs.getString(2);
+                        }
+                    }
+                }
+            } catch (SQLException ignore) {
+                // migration model probably does not exist so we assume the database is empty
+            }
             createOperationalInfo(connection);
             addSpecificNamedQueries(session);
-            schemaChanged = createOrUpdateSchema(getSchema(), connection, session);
+            schemaChanged = createOrUpdateSchema(schema, version, connection, session);
         } catch (SQLException cause) {
             throw new RuntimeException("Failed to update database.", cause);
         } finally {
@@ -134,11 +155,35 @@ public class QuarkusJpaConnectionProviderFactory extends AbstractJpaConnectionPr
 
         if (schemaChanged || Environment.isImportExportMode()) {
             runJobInTransaction(factory, this::initSchema);
+        } else if (System.getProperty("keycloak.import") != null) {
+            importRealms();
         } else {
-            //KEYCLOAK-19521 - We should think about a solution which doesn't involve another db lookup in the future.
-            MigrationModel model = session.getProvider(DeploymentStateProvider.class).getMigrationModel();
-            Version.RESOURCES_VERSION = model.getResourcesTag();
+            Version.RESOURCES_VERSION = id;
         }
+    }
+
+    @Override
+    public List<ProviderConfigProperty> getConfigMetadata() {
+        return ProviderConfigurationBuilder.create()
+                .property()
+                .name("initializeEmpty")
+                .type("boolean")
+                .helpText("Initialize database if empty. If set to false the database has to be manually initialized. If you want to manually initialize the database set migrationStrategy to manual which will create a file with SQL commands to initialize the database.")
+                .defaultValue(true)
+                .add()
+                .property()
+                .name("migrationStrategy")
+                .type("string")
+                .helpText("Strategy to use to migrate database. Valid values are update, manual and validate. Update will automatically migrate the database schema. Manual will export the required changes to a file with SQL commands that you can manually execute on the database. Validate will simply check if the database is up-to-date.")
+                .options("update", "manual", "validate")
+                .defaultValue("update")
+                .add()
+                .property()
+                .name("migrationExport")
+                .type("string")
+                .helpText("Path for where to write manual database initialization/migration file.")
+                .add()
+                .build();
     }
 
     @Override
@@ -277,9 +322,15 @@ public class QuarkusJpaConnectionProviderFactory extends AbstractJpaConnectionPr
                 String file = tokenizer.nextToken().trim();
                 RealmRepresentation rep;
                 try {
-                    rep = JsonSerialization.readValue(new FileInputStream(file), RealmRepresentation.class);
-                } catch (Exception e) {
-                    throw new RuntimeException(e);
+                    rep = JsonSerialization.readValue(StringPropertyReplacer.replaceProperties(
+                            Files.readString(Paths.get(file)), new StringPropertyReplacer.PropertyResolver() {
+                                @Override
+                                public String resolve(String property) {
+                                    return Optional.ofNullable(System.getenv(property)).orElse(null);
+                                }
+                            }), RealmRepresentation.class);
+                } catch (Exception cause) {
+                    throw new RuntimeException("Failed to parse realm configuration file: " + file, cause);
                 }
                 importRealm(rep, "file " + file);
             }
@@ -300,7 +351,7 @@ public class QuarkusJpaConnectionProviderFactory extends AbstractJpaConnectionPr
                     exists = true;
                 }
 
-                if (manager.getRealmByName(rep.getRealm()) != null) {
+                if (!exists && manager.getRealmByName(rep.getRealm()) != null) {
                     ServicesLogger.LOGGER.realmExists(rep.getRealm(), from);
                     exists = true;
                 }
@@ -309,10 +360,10 @@ public class QuarkusJpaConnectionProviderFactory extends AbstractJpaConnectionPr
                     ServicesLogger.LOGGER.importedRealm(realm.getName(), from);
                 }
                 session.getTransactionManager().commit();
-            } catch (Throwable t) {
+            } catch (Throwable cause) {
                 session.getTransactionManager().rollback();
                 if (!exists) {
-                    ServicesLogger.LOGGER.unableToImportRealm(t, rep.getRealm(), from);
+                    throw new RuntimeException("Failed to import realm: " + rep.getRealm(), cause);
                 }
             }
         } finally {
@@ -404,24 +455,10 @@ public class QuarkusJpaConnectionProviderFactory extends AbstractJpaConnectionPr
         }
     }
 
-    private boolean createOrUpdateSchema(String schema, Connection connection, KeycloakSession session) {
+    private boolean createOrUpdateSchema(String schema, String version, Connection connection, KeycloakSession session) {
         MigrationStrategy strategy = getMigrationStrategy();
         boolean initializeEmpty = config.getBoolean("initializeEmpty", true);
         File databaseUpdateFile = getDatabaseUpdateFile();
-
-        String version = null;
-
-        try {
-            try (Statement statement = connection.createStatement()) {
-                try (ResultSet rs = statement.executeQuery(String.format(SQL_GET_LATEST_VERSION, getSchema(schema)))) {
-                    if (rs.next()) {
-                        version = rs.getString(1);
-                    }
-                }
-            }
-        } catch (SQLException ignore) {
-            // migration model probably does not exist so we assume the database is empty
-        }
 
         JpaUpdaterProvider updater = session.getProvider(JpaUpdaterProvider.class);
 
